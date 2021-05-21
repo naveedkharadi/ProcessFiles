@@ -21,17 +21,17 @@ namespace ProcessCubeFile
         private static string _shareName = Environment.GetEnvironmentVariable("File_Share");
         private static string _inputFolder = Environment.GetEnvironmentVariable("Input_Folder");
         private static string _outputFolder = Environment.GetEnvironmentVariable("Output_Folder");
-        private static string _connectionString = Environment.GetEnvironmentVariable("AzureWebJobsStorage");
-
+        private static string _connectionString = Environment.GetEnvironmentVariable("File_Share_Connection");
+        
         [FunctionName("ProcessFiles")]
         public static async Task RunAsync([TimerTrigger("%Job_Schedule%")]TimerInfo myTimer, ILogger log)
         {
             log.LogInformation($"C# Timer trigger function executed at: {DateTime.Now}");
 
-            await TraverseAsync(_connectionString, _shareName);
+            await TraverseAsync(_connectionString, _shareName, log);
         }
 
-        private static async Task TraverseAsync(string connectionString, string shareName)
+        private static async Task TraverseAsync(string connectionString, string shareName, ILogger log)
         {
             ShareClient share = new ShareClient(connectionString, shareName);
 
@@ -42,7 +42,7 @@ namespace ProcessCubeFile
             await foreach (ShareFileItem item in root.GetFilesAndDirectoriesAsync())
             {
                 // Print the name of the item
-                Log(item.Name);
+                log.LogInformation(item.Name);
 
                 // If the item is our input folder then traverse it
                 if (item.IsDirectory && item.Name == _inputFolder)
@@ -52,111 +52,12 @@ namespace ProcessCubeFile
                     {
                         if (!inputItem.IsDirectory)
                         {
-                            await ProcessFile(connectionString, shareName, subClient.Name, inputItem.Name);
+                            var fileProcessor = new FileProcessor(connectionString, shareName, subClient.Name, inputItem.Name, _pattern, _outputFolder, log);
+                            await fileProcessor.ProcessFile();
                         }
                     }
                 }
             }
-        }
-
-        private static async Task ProcessFile(string connectionString, string shareName, string dirName, string fileName)
-        {
-            (var share, var directory, var file) = GetFileShareClients(connectionString, shareName, dirName, fileName);
-            Stopwatch stopwatch = new Stopwatch();
-            ShareFileDownloadInfo download = await file.DownloadAsync();
-            bool matchFound = false;
-            Log($"Processing file: {file.Name} -> Size: {download.ContentLength} bytes.");
-            stopwatch.Start();
-            using (Stream fs = download.Content)
-            using (BufferedStream bs = new BufferedStream(fs))
-            using (StreamReader sr = new StreamReader(bs))
-            {
-                string line;
-                while ((line = sr.ReadLine()) != null)
-                {
-                    var match = Regex.Match(line, _pattern);
-                    if(match != null && match.Success)
-                    {
-                        Log($"Pattern {_pattern} matched: {match}");
-                        matchFound = true;
-                        break;
-                    }
-                }
-            }
-            if(matchFound)
-            {
-                stopwatch.Stop();
-                Log($"Pattern matched - moving {file.Uri} to {_outputFolder} in the File Share.");
-                Log($"Pattern mateched in: {stopwatch.ElapsedMilliseconds} milliseconds.");
-                await MoveFileAsync(share, directory, file, _outputFolder);
-            }
-            else
-            {
-                stopwatch.Stop();
-                Log($"Pattern NOT matched - deleting {file.Uri}.");
-                Log($"Time taken to read the file: {stopwatch.ElapsedMilliseconds} milliseconds.");
-                await DeleteFileAsync(file);
-            }
-            stopwatch.Reset();
-        }
-
-        private static (ShareClient, ShareDirectoryClient, ShareFileClient) GetFileShareClients(string connectionString, string shareName, string dirName, string fileName)
-        {
-            ShareClient share = new ShareClient(connectionString, shareName);
-            ShareDirectoryClient directory = share.GetDirectoryClient(dirName);
-            ShareFileClient file = directory.GetFileClient(fileName);
-            
-            return (share, directory, file);
-        }
-
-        private static async Task DeleteFileAsync(ShareFileClient file)
-        {
-            try
-            {
-                if (await file.DeleteIfExistsAsync())
-                {
-                    Log($"Deleted {file.Uri}.");
-                }
-            }
-            catch (Exception ex)
-            {
-                Log(ex);
-            }
-        }
-
-        private static async Task MoveFileAsync(ShareClient share, ShareDirectoryClient directory, ShareFileClient file, string outputFolder)
-        {
-            try
-            {
-                ShareDirectoryClient outputDirectory = share.GetDirectoryClient(outputFolder);
-
-                await outputDirectory.CreateIfNotExistsAsync();
-                if (outputDirectory.Exists())
-                {
-                    ShareFileClient outputFile = outputDirectory.GetFileClient(file.Name);
-                    await outputFile.StartCopyAsync(file.Uri);
-
-                    if (await outputFile.ExistsAsync())
-                    {
-                        Log($"{file.Uri} copied to {outputFile.Uri}");
-                        await DeleteFileAsync(file);
-                    }
-                }
-            }
-            catch(Exception ex)
-            {
-                Log(ex);
-            }
-        }
-
-        private static void Log(string message)
-        {
-            Console.WriteLine(message);
-        }
-
-        private static void Log(Exception exception)
-        {
-            Console.WriteLine(exception);
-        }
+        }        
     }
 }
